@@ -11,6 +11,8 @@
 using namespace cv;
 using namespace std;
 
+static const double pi = 3.1415926;
+
 __global__ 
 void gaussian_kernel(uchar *d_img_in, uchar *d_img_out, double *d_arr,
                                 const int img_cols, const int img_rows, const int size)
@@ -53,30 +55,34 @@ void gaussian_cuda(const Mat &img_in, Mat &img_out, const int &size, const doubl
     img_out = Mat::zeros(img_in.size(), CV_8UC1);
 
     double *arr = (double*)malloc(size*size * sizeof(double));
-    auto getGuassionArray = [&]()
+    auto getGassianArray = [&]()
     {
         double sum = 0.0;
         auto sigma_2 = sigma * sigma;
-        for (int i{}; i < size; ++i)
+        int center = size / 2; 
+
+        for (int i = 0; i < size; ++i)
         {
-            auto dx = i - size;
-            for (int j{}; j < size; ++j)
+            auto dx_2 = pow(i - center, 2);
+            for (int j = 0; j < size; ++j)
             {
-                auto dy = j - size;
-                arr[i * size + j] = exp(-(dx*dx + dy * dy) / (sigma_2 * 2));
-                sum += arr[i * size + j];
+                auto dy_2 = pow(j - center, 2);
+                double g = exp(-(dx_2 + dy_2) / (2 * sigma_2));
+                g /= 2 * pi * sigma;
+                arr[i * size + j] = g;
+                sum += g;
             }
         }
         //归一化，卷积核，窗内和必须为1，保证原图的总值强度不变
-        for (size_t i{}; i < size; ++i)
+        for (size_t i = 0; i < size; ++i)
         {
-            for (size_t j{}; j < size; ++j)
+            for (size_t j = 0; j < size; ++j)
             {
                 arr[i * size + j] /= sum;
             }
         }
     };
-    getGuassionArray();
+    getGassianArray();
 
     if(ifdebug){
         double sum = 0.0;
@@ -127,7 +133,7 @@ void gaussian_cuda(const Mat &img_in, Mat &img_out, const int &size, const doubl
 
 int main(int argc, char *argv[])
 {
-    int sigma = atoi(argv[1]);
+    double sigma = atof(argv[1]);
     int window_size = atoi(argv[2]);
     auto img = imread("images/sample.jpg");
     Mat img_gray;
