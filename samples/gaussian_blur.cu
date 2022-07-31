@@ -6,7 +6,10 @@
 #include<cmath>
 
 #ifndef WITHOUT_CV
-#include<opencv2/opencv.hpp>
+#include <opencv2/core/core.hpp>
+#include <opencv2/opencv.hpp>
+#include <opencv2/highgui/highgui.hpp>
+#include <opencv2/imgproc/imgproc.hpp>
 #endif
 using namespace cv;
 using namespace std;
@@ -137,7 +140,7 @@ int main(int argc, char *argv[])
     int window_size = atoi(argv[2]);
     auto img = imread("images/sample.jpg");
     Mat img_gray;
-    cvtColor(img, img_gray, CV_BGR2GRAY);
+    cvtColor(img, img_gray, cv::COLOR_BGR2GRAY);
     imwrite("images/sample_gray.jpg", img_gray);
     // auto img2 {Mat::zeros(33,33, CV_8UC1)};
     Mat gaussian;

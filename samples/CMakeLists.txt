@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.16)
+cmake_minimum_required(VERSION 3.10)
 project(${PROJECT_NAME}
     LANGUAGES CXX C CUDA
     VERSION ${PROJECT_VERSION}
