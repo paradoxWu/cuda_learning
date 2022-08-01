@@ -1,9 +1,12 @@
-
 #include<iostream>
 #include<string>
+#include<cmath>
+#include <chrono>
+#include <thread>
+#include <vector>
+
 #include<cuda_runtime.h>
 #include<device_launch_parameters.h>
-#include<cmath>
 
 #ifndef WITHOUT_CV
 #include <opencv2/core/core.hpp>
@@ -49,10 +52,8 @@ void gaussian_kernel(uchar *d_img_in, uchar *d_img_out, double *d_arr,
 
 }
 
-void gaussian_cuda(const Mat &img_in, Mat &img_out, const int &size, const double &sigma, int block_size = 16)
+void gaussian_cuda(const Mat &img_in, Mat &img_out, const int &size, const double &sigma, int block_size = 32)
 {
-    bool ifdebug = true;
-
     const int img_sizeof = img_in.cols*img_in.rows * sizeof(uchar);
     const int arr_sizeof = size * size * sizeof(double);
     img_out = Mat::zeros(img_in.size(), CV_8UC1);
@@ -87,19 +88,6 @@ void gaussian_cuda(const Mat &img_in, Mat &img_out, const int &size, const doubl
     };
     getGassianArray();
 
-    if(ifdebug){
-        double sum = 0.0;
-        for (int i{}; i < size; ++i)
-        {
-            for (int j{}; j < size; ++j){
-                cout << arr[j + i * size] << " ";
-                sum += arr[j + i * size];
-            }
-            cout << endl;
-        }
-        cout<<"gaussian_template_sum:"<<sum<<endl;
-    }
-
     double *d_arr;		//之后做成共享内存
     uchar *d_img_in;
     uchar *d_img_out;
@@ -110,42 +98,112 @@ void gaussian_cuda(const Mat &img_in, Mat &img_out, const int &size, const doubl
     cudaMemcpy(d_arr, arr, arr_sizeof, cudaMemcpyHostToDevice);
     cudaMemcpy(d_img_in, img_in.data, img_sizeof, cudaMemcpyHostToDevice);
 
-    // if(ifdebug){
-    //     cout<<"img_in "<<img_in<<endl;
-    // }
-
-
-    int BLOCKDIM_X=32,BLOCKDIM_Y=32;
+    int BLOCKDIM_X=block_size,BLOCKDIM_Y=block_size;
     dim3 Block_G (BLOCKDIM_X, BLOCKDIM_Y);
     dim3 Grid_G ((uint)ceil((double)img_in.cols / BLOCKDIM_X),(uint)ceil((double)img_in.rows/BLOCKDIM_Y));
-    // cout<<Grid_G.x<<Grid_G.y<<endl;
 
+    std::chrono::time_point<std::chrono::system_clock> start_time(std::chrono::system_clock::now());
     gaussian_kernel <<< Grid_G, Block_G >>>(d_img_in, d_img_out, d_arr, img_in.cols, img_in.rows, size);
+    auto duration =std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now() - start_time);
+    std::cout<<"cost by GPU:"<<duration.count()<<"ms"<<std::endl;
 
     cudaMemcpy(img_out.data, d_img_out, img_sizeof, cudaMemcpyDeviceToHost);
     cudaFree(d_arr);
     cudaFree(d_img_in);
     cudaFree(d_img_out);
-
-    // if(ifdebug){
-    //     cout<<"img_out "<<img_out<<endl;
-    // }
-
     free(arr);
 }
+
+// @param[in]: src_img, size,simga:(gaussian window size and sigma value)
+// @param[out]: dst_img
+void gaussian_thread(const cv::Mat &src_img, cv::Mat &dst_img,const size_t &size,const double &sigma)
+{
+    dst_img = cv::Mat::zeros(src_img.size(),CV_8UC1);
+    double arr[size*size];
+    const auto size_2 = size>>1;
+    const auto max_thread = std::thread::hardware_concurrency();
+    std::vector<std::thread> thread_bar;
+    const auto t_rows = src_img.rows / (max_thread);
+    //initialize the gaussian window
+    auto getGassianArray = [&]()
+    {
+        double sum = 0.0;
+        auto sigma_2 = sigma * sigma;
+        int center = size / 2; 
+
+        for (int i = 0; i < size; ++i)
+        {
+            auto dx_2 = pow(i - center, 2);
+            for (int j = 0; j < size; ++j)
+            {
+                auto dy_2 = pow(j - center, 2);
+                double g = exp(-(dx_2 + dy_2) / (2 * sigma_2));
+                g /= 2 * pi * sigma;
+                arr[i * size + j] = g;
+                sum += g;
+            }
+        }
+        //归一化，卷积核，窗内和必须为1，保证原图的总值强度不变
+        for (size_t i = 0; i < size; ++i)
+        {
+            for (size_t j = 0; j < size; ++j)
+            {
+                arr[i * size + j] /= sum;
+            }
+        }
+    };
+    getGassianArray();
+#ifdef DEBUG
+    for(size_t i = 0; i < size; i++){
+        for(size_t j = 0; j < size; j++){
+            cout<<arr[i*size+j]<<" ";
+        }
+        cout<<endl;
+    }
+#endif
+
+    auto compGassion_thread = [&](const int thread_id){
+        for(auto i{ t_rows * (thread_id - 1)}; i < t_rows *thread_id; ++i)
+        {
+            auto out_p = &dst_img.data[i * src_img.cols];
+            for(auto j{size_2}; j < src_img.cols - size_2; ++j)
+            {
+                double sum = 0.0;
+                for(size_t y = 0; y < size; ++y)
+                {
+                    auto in_p = &src_img.data[(i+y) * src_img.cols + j];
+                    for(size_t x = 0; x < size; ++x)
+                    {
+                        sum += *(in_p + x) * arr[x * size + y];
+                    }
+                }
+                *(out_p + j)=static_cast<char>(sum);
+            }
+        }
+    };
+
+    std::chrono::time_point<std::chrono::system_clock> start_time(std::chrono::system_clock::now());
+    for(int thread_id = 1; thread_id <= max_thread; ++thread_id){
+        thread_bar.emplace_back(compGassion_thread, thread_id);
+    }
+    for(auto &i : thread_bar){
+        i.join();
+    }
+    auto duration =std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now() - start_time);
+    std::cout<<"cost by CPU_Concurrency:"<<duration.count()<<"ms"<<std::endl;
+}
+
 
 int main(int argc, char *argv[])
 {
     double sigma = atof(argv[1]);
     int window_size = atoi(argv[2]);
-    auto img = imread("images/sample.jpg");
+    auto img = imread("images/Lenna.jpeg");
     Mat img_gray;
     cvtColor(img, img_gray, cv::COLOR_BGR2GRAY);
-    imwrite("images/sample_gray.jpg", img_gray);
-    // auto img2 {Mat::zeros(33,33, CV_8UC1)};
     Mat gaussian;
     gaussian_cuda(img_gray, gaussian, window_size, sigma);
-    string save_name = "images/gaussian_cuda"+to_string(window_size)+to_string(sigma)+".jpg";
-    imwrite(save_name, gaussian);
-
+    gaussian_thread(img_gray, gaussian,window_size,sigma);
+    // string save_name = "images/gaussian_cuda"+to_string(window_size)+to_string(sigma)+".jpg";
+    // imwrite(save_name, gaussian);
 }
