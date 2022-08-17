@@ -52,7 +52,7 @@ void gaussian_kernel(uchar *d_img_in, uchar *d_img_out, double *d_arr,
 
 }
 
-void gaussian_cuda(const Mat &img_in, Mat &img_out, const int &size, const double &sigma, int block_size = 32)
+void gaussian_cuda(const Mat &img_in, Mat &img_out, const int &size, const double &sigma)
 {
     const int img_sizeof = img_in.cols*img_in.rows * sizeof(uchar);
     const int arr_sizeof = size * size * sizeof(double);
@@ -97,6 +97,12 @@ void gaussian_cuda(const Mat &img_in, Mat &img_out, const int &size, const doubl
 
     cudaMemcpy(d_arr, arr, arr_sizeof, cudaMemcpyHostToDevice);
     cudaMemcpy(d_img_in, img_in.data, img_sizeof, cudaMemcpyHostToDevice);
+
+    int minGridSize;
+    int blockSize;
+    cudaOccupancyMaxPotentialBlockSize(&minGridSize,&blockSize,gaussian_kernel,0,100000);
+    int block_size = sqrt(blockSize);
+    std::cout<<"suitable block size:"<<block_size<<std::endl;
 
     int BLOCKDIM_X=block_size,BLOCKDIM_Y=block_size;
     dim3 Block_G (BLOCKDIM_X, BLOCKDIM_Y);
@@ -204,6 +210,6 @@ int main(int argc, char *argv[])
     Mat gaussian;
     gaussian_cuda(img_gray, gaussian, window_size, sigma);
     gaussian_thread(img_gray, gaussian,window_size,sigma);
-    // string save_name = "images/gaussian_cuda"+to_string(window_size)+to_string(sigma)+".jpg";
-    // imwrite(save_name, gaussian);
+    string save_name = "images/gaussian_cuda"+to_string(window_size)+to_string(sigma)+".jpg";
+    imwrite(save_name, gaussian);
 }
