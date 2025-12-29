@@ -13,6 +13,7 @@ add_executable(hello_world hello.cu)
 #         CUDA_SEPARABLE_COMPILATION ON)
 
 add_executable(add_vec vecadd.cu)
+add_executable(matmul matmul.cu)
 
 find_package( OpenCV REQUIRED )
 IF (OpenCV_FOUND)
@@ -28,4 +29,5 @@ target_link_libraries(gaussian_blur ${OpenCV_LIBS} )
 # CMAKE_INSTALL_PREFIX的默认定义是/usr/local
 install(TARGETS hello_world DESTINATION install)
 install(TARGETS add_vec DESTINATION install)
+install(TARGETS matmul DESTINATION install)
 install(TARGETS gaussian_blur DESTINATION install)
