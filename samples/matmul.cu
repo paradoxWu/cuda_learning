@@ -79,27 +79,28 @@ __global__ void matrix_mul_v2(
     __shared__ float SB[BLOCK_DIM][BLOCK_DIM];
     int width = (K + BLOCK_DIM - 1) / BLOCK_DIM;
     for (int ph = 0; ph < width; ph++)
-    {
-        if (row < M && threadIdx.y + ph * BLOCK_DIM < K)
+    {   
+        // memcpy to the share memory
+        if (row < M && threadIdx.x + ph * BLOCK_DIM < K)
         {
-            SA[threadIdx.x][threadIdx.y] = A[row * K + threadIdx.y + ph * BLOCK_DIM];
+            SA[threadIdx.y][threadIdx.x] = A[row * K + threadIdx.x + ph * BLOCK_DIM];
         }
         else
         {
-            SA[threadIdx.x][threadIdx.y] = 0.0f;
+            SA[threadIdx.y][threadIdx.x] = 0.0f;
         }
         if (threadIdx.x + ph * BLOCK_DIM < K && col < N)
         {
-            SB[threadIdx.x][threadIdx.y] = B[(threadIdx.x + ph * BLOCK_DIM) * N + col];
+            SB[threadIdx.y][threadIdx.x] = B[(threadIdx.y + ph * BLOCK_DIM) * N + col];
         }
         else
         {
-            SB[threadIdx.x][threadIdx.y] = 0.0f;
+            SB[threadIdx.y][threadIdx.x] = 0.0f;
         }
         __syncthreads();
         for (int s = 0; s < BLOCK_DIM; s++)
         {
-            tmp += SA[threadIdx.x][s] * SB[s][threadIdx.y];
+            tmp += SA[threadIdx.y][s] * SB[s][threadIdx.x];
         }
          __syncthreads();
     }
