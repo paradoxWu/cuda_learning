@@ -14,6 +14,7 @@ add_executable(hello_world hello.cu)
 
 add_executable(add_vec vecadd.cu)
 add_executable(matmul matmul.cu)
+add_executable(mattran mattran.cu)
 
 find_package( OpenCV REQUIRED )
 IF (OpenCV_FOUND)
@@ -30,4 +31,5 @@ target_link_libraries(gaussian_blur ${OpenCV_LIBS} )
 install(TARGETS hello_world DESTINATION install)
 install(TARGETS add_vec DESTINATION install)
 install(TARGETS matmul DESTINATION install)
+install(TARGETS mattran DESTINATION install)
 install(TARGETS gaussian_blur DESTINATION install)
