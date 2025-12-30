@@ -27,8 +27,8 @@ bool GetDif(int M, int N, const float *mat1, const float *mat2)
             if (mat1[i * N + j] - mat2[i * N + j] >
                 std::numeric_limits<float>::epsilon())
             {
-                std::cout << "error happen:" << i << ":" << mat1[i * N + j] << "," << j
-                          << ":" << mat2[i * N + j];
+                std::cout << "error happen:" << i << "," << j
+                          << ": " << mat1[i * N + j] << "  " << mat2[i * N + j];
                 return false;
             }
         }
@@ -79,18 +79,20 @@ __global__ void mattranGpu_v1(const float *in, float *out, int M, int N)
 template <int BLOCK_DIM>
 __global__ void mattranGpu_v2(const float *in, float *out, int M, int N)
 {
-    int col = threadIdx.x + blockDim.x*blockIdx.x;
-    int row = threadIdx.y + blockDim.y* blockIdx.y;
+    int col = threadIdx.x + blockDim.x * blockIdx.x;
+    int row = threadIdx.y + blockDim.y * blockIdx.y;
     __shared__ float SA[BLOCK_DIM][BLOCK_DIM];
     // copy to shared memory
-    if(col<N&&row<M){
-        SA[threadIdx.y][threadIdx.x] = in[row*N+col];
+    if (col < N && row < M)
+    {
+        SA[threadIdx.y][threadIdx.x] = in[row * N + col];
     }
     __syncthreads();
     // copy to out matrix
-    int out_x = threadIdx.x + blockIdx.y*BLOCK_DIM;
-    int out_y = threadIdx.y + blockIdx.x*BLOCK_DIM;
-    out[out_y*M+out_x] = SA[threadIdx.x][threadIdx.y];
+    int out_x = threadIdx.x + blockIdx.y * BLOCK_DIM;
+    int out_y = threadIdx.y + blockIdx.x * BLOCK_DIM;
+    if (out_y < N && out_x < M)
+        out[out_y * M + out_x] = SA[threadIdx.x][threadIdx.y];
 }
 
 void mattranGpu(const float *in, float *out, int M, int N)
