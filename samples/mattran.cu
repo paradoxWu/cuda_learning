@@ -83,7 +83,8 @@ __global__ void mattranGpu_v2(const float *in, float *out, int M, int N)
     int row = threadIdx.y + blockDim.y * blockIdx.y;
     __shared__ float SA[BLOCK_DIM][BLOCK_DIM];
     // copy to shared memory
-    if (col < N && row < M)
+    bool valid = (col < N) && (row < M);
+    if (valid)
     {
         SA[threadIdx.y][threadIdx.x] = in[row * N + col];
     }
@@ -91,7 +92,7 @@ __global__ void mattranGpu_v2(const float *in, float *out, int M, int N)
     // copy to out matrix
     int out_x = threadIdx.x + blockIdx.y * BLOCK_DIM;
     int out_y = threadIdx.y + blockIdx.x * BLOCK_DIM;
-    if (out_y < N && out_x < M)
+    if (valid)
         out[out_y * M + out_x] = SA[threadIdx.x][threadIdx.y];
 }
 
