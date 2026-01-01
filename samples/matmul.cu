@@ -23,6 +23,11 @@ C = A*B
         }                                                                    \
     } while (0)
 
+__global__ void warm_up()
+{
+    unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
+}
+
 void showMatrix(int M, int N, const float *mat)
 {
     for (int i = 0; i < M; ++i)
@@ -184,6 +189,7 @@ int main()
     std::vector<float> h_D(M * N, 0.0f);
     // cpu calculate
     matrixCpu(h_A.data(), h_B.data(), h_C.data(), M, N, K);
+    warm_up<<< 1, 5 >>>();
     matmulGpu(h_A, h_B, h_D, M, N, K);
     if (GetDif(M, N, h_C.data(), h_D.data()))
     {
