@@ -224,7 +224,78 @@ __global__ void reduce_interleaved_final(const float *partial, float *out,
 }
 
 // 交错规约 end
+// shuffle warp
+inline __device__ float warpReduceSum(float val)
+{
+    for (int mask = 16; mask > 0; mask >>= 1)
+        val += __shfl_xor_sync(0xffffffff, val, mask);
+    return val; // 返回后 **所有线程** 都是 sum
+}
 
+__global__ void reduce_shuffle(const float *d_in, float *d_out, int n)
+{
+    int idx = threadIdx.x + blockIdx.x * blockDim.x;
+    int tid = threadIdx.x;
+    float val = (idx < n) ? d_in[idx] : 0;
+    val = warpReduceSum(val); // 求一个warp内的和
+    // 每个warp的首线程（lane 0）将结果存入共享内存，再做block内归约
+    extern __shared__ float sdata[];
+    if (tid % 32 == 0)
+    {
+        sdata[tid / 32] = val;
+    }
+    __syncthreads();
+    // 块内归约
+    int warp_size = blockDim.x / 32;
+    if (tid < warp_size)
+    {
+        val = sdata[tid];
+        for (int step = warp_size / 2; step > 0; step >>= 1)
+        {
+            if (tid < step)
+            {
+                val += sdata[tid + step];
+            }
+        }
+    }
+    if (tid == 0)
+    {
+        d_out[blockIdx.x] = val;
+    }
+}
+
+__global__ void reduce_shuffle_final(const float *d_in, float *d_out, int n)
+{
+    int idx = threadIdx.x + blockIdx.x * blockDim.x;
+    float val = (idx < n) ? d_in[idx] : 0;
+    val = warpReduceSum(val);
+    // 每个warp的首线程（lane 0）将结果存入共享内存，再做block内归约
+    extern __shared__ float sdata[];
+    if (threadIdx.x % 32 == 0)
+    {
+        sdata[threadIdx.x / 32] = val;
+    }
+    __syncthreads();
+    // 块内归约
+    int warp_size = blockDim.x / 32;
+    if (threadIdx.x < warp_size)
+    {
+        val = sdata[threadIdx.x];
+        for (int step = warp_size / 2; step > 0; step /= 2)
+        {
+            if (threadIdx.x < step)
+            {
+                val += sdata[threadIdx.x + step];
+            }
+        }
+    }
+    if (threadIdx.x == 0)
+    {
+        *d_out = val;
+    }
+}
+
+// shuffle end
 // cuda main func
 void reducegpu(const float *h_in, float *h_out, int n, int method)
 {
@@ -249,7 +320,7 @@ void reducegpu(const float *h_in, float *h_out, int n, int method)
     cudaMemset(d_active_warp_count, 0, gpu_info.num_sms * sizeof(int));
     cudaMemset(d_total_active_threads, 0, sizeof(int));
 
-    const int block_size = 256;
+    const int block_size = 128;
     int grid_size = 1;
 
     // warm-up
@@ -296,6 +367,16 @@ void reducegpu(const float *h_in, float *h_out, int n, int method)
             reduce_neighbor<<<grid_size, block_size, block_size * sizeof(float)>>>(
                 d_in, d_tmp, n);
             reduce_neighbor_final<<<1, grid_size, grid_size * sizeof(float)>>>(
+                d_tmp, d_out, n);
+            cudaFree(d_tmp);
+            break;
+        case (4):
+            grid_size = n / block_size;
+            cudaMalloc(&d_tmp, sizeof(float) * grid_size);
+            cudaMemset(d_tmp, 0, sizeof(float) * grid_size);
+            reduce_shuffle<<<grid_size, block_size,
+                             block_size / 32 * sizeof(float)>>>(d_in, d_tmp, n);
+            reduce_shuffle_final<<<1, grid_size, grid_size / 32 * sizeof(float)>>>(
                 d_tmp, d_out, n);
             cudaFree(d_tmp);
             break;
