@@ -80,59 +80,7 @@ void reduce_cpu(const float *x, int n, float &res)
     std::cout << "cost by CPU:" << duration.count() * 1e-3 << "ms" << std::endl;
 }
 
-__global__ void reduce0(const float *in, float *out, int n)
-{
-    const int thread_size = blockDim.x;
-    extern __shared__ float shm[]; // 动态共享内存
-    int tid = threadIdx.x;
-    int i = threadIdx.x;
-    float local = 0.0f;
-    // grid-stride loop 让每个线程处理多个元素
-    while (i < n)
-    {
-        local += in[i];
-        i += blockDim.x;
-    }
-    shm[tid] = local;
-    __syncthreads();
-
-    for (int step = 1; step < thread_size; step *= 2)
-    {
-        if (threadIdx.x % (2 * step) == 0)
-        {
-            shm[threadIdx.x] += shm[threadIdx.x + step];
-        }
-        __syncthreads();
-    }
-    if (tid == 0)
-        *out = shm[0];
-}
-
 // 交叉规约
-__global__ void reduce_neighbor_1block(const float *g_in, float *g_out, int n)
-{
-    extern __shared__ float shm[]; // 动态共享内存
-    int tid = threadIdx.x;
-
-    /* 1. 初加载：grid-stride 累加，保证所有线程吃饱 */
-    float local = 0.0f;
-    for (int i = tid; i < n; i += blockDim.x)
-        local += g_in[i];
-    shm[tid] = local;
-    __syncthreads();
-
-    /* 2. 相邻减半（neighbor / sequential） */
-    for (int stride = 1; stride < blockDim.x; stride *= 2)
-    {
-        __syncthreads();               // 先同步，再读
-        if (tid < blockDim.x - stride) // 工作线程：0 .. (stride-1)
-            shm[tid] += shm[tid + stride];
-    }
-
-    if (tid == 0)
-        *g_out = shm[0];
-}
-
 __global__ void reduce_neighbor(const float *g_in, float *g_out, int n)
 {
     extern __shared__ float shm[];
@@ -159,9 +107,14 @@ __global__ void reduce_neighbor_final(const float *g_in, float *g_out,
 {
     extern __shared__ float shm[];
     int tid = threadIdx.x;
-    int i = threadIdx.x + blockDim.x * blockIdx.x;
-    shm[tid] = (i < blocks) ? g_in[i] : 0.0f;
+    float val = 0.0f;
+    for (int i = tid; i < blocks; i += blockDim.x)
+    {
+        val += g_in[i];
+    }
+    shm[tid] = val;
     __syncthreads();
+
     for (int stride = 1; stride < blockDim.x; stride *= 2)
     {                               // 相邻配对
         int idx = 2 * stride * tid; // 0,2,4,8...
@@ -174,7 +127,6 @@ __global__ void reduce_neighbor_final(const float *g_in, float *g_out,
     if (tid == 0)
         *g_out = shm[0];
 }
-
 // 交叉规约 end
 
 // 交错规约
@@ -222,8 +174,8 @@ __global__ void reduce_interleaved_final(const float *partial, float *out,
     if (tid == 0)
         *out = shm[0];
 }
-
 // 交错规约 end
+
 // shuffle warp
 inline __device__ float warpReduceSum(float val)
 {
@@ -250,13 +202,7 @@ __global__ void reduce_shuffle(const float *d_in, float *d_out, int n)
     if (tid < warp_size)
     {
         val = sdata[tid];
-        for (int step = warp_size / 2; step > 0; step >>= 1)
-        {
-            if (tid < step)
-            {
-                val += sdata[tid + step];
-            }
-        }
+        val = warpReduceSum(val);
     }
     if (tid == 0)
     {
@@ -264,32 +210,31 @@ __global__ void reduce_shuffle(const float *d_in, float *d_out, int n)
     }
 }
 
-__global__ void reduce_shuffle_final(const float *d_in, float *d_out, int n)
+__global__ void reduce_shuffle_final(const float *d_in, float *d_out,
+                                     int blocks)
 {
-    int idx = threadIdx.x + blockIdx.x * blockDim.x;
-    float val = (idx < n) ? d_in[idx] : 0;
+    int tid = threadIdx.x;
+    float val = 0.0f;
+    for (int i = tid; i < blocks; i += blockDim.x)
+    {
+        val += d_in[i];
+    }
     val = warpReduceSum(val);
     // 每个warp的首线程（lane 0）将结果存入共享内存，再做block内归约
     extern __shared__ float sdata[];
-    if (threadIdx.x % 32 == 0)
+    if (tid % 32 == 0)
     {
-        sdata[threadIdx.x / 32] = val;
+        sdata[tid / 32] = val;
     }
     __syncthreads();
     // 块内归约
     int warp_size = blockDim.x / 32;
-    if (threadIdx.x < warp_size)
+    if (tid < warp_size)
     {
-        val = sdata[threadIdx.x];
-        for (int step = warp_size / 2; step > 0; step /= 2)
-        {
-            if (threadIdx.x < step)
-            {
-                val += sdata[threadIdx.x + step];
-            }
-        }
+        val = sdata[tid];
+        val = warpReduceSum(val);
     }
-    if (threadIdx.x == 0)
+    if (tid == 0)
     {
         *d_out = val;
     }
@@ -313,19 +258,12 @@ void reducegpu(const float *h_in, float *h_out, int n, int method)
     cudaMemcpy(d_in, h_in, bytes, cudaMemcpyHostToDevice);
     cudaMemset(d_out, 0, sizeof(float));
 
-    int *d_active_warp_count;    // 每个SM的活跃Warp数
-    int *d_total_active_threads; // 总活跃线程数
-    cudaMalloc(&d_active_warp_count, gpu_info.num_sms * sizeof(int));
-    cudaMalloc(&d_total_active_threads, sizeof(int));
-    cudaMemset(d_active_warp_count, 0, gpu_info.num_sms * sizeof(int));
-    cudaMemset(d_total_active_threads, 0, sizeof(int));
-
-    const int block_size = 128;
+    const int block_size = 256;
     int grid_size = 1;
 
     // warm-up
-    reduce0<<<grid_size, block_size, block_size * sizeof(float)>>>(d_in, d_out,
-                                                                   n);
+    reduce_interleaved_final<<<grid_size, block_size,
+                               block_size * sizeof(float)>>>(d_in, d_out, n);
     cudaDeviceSynchronize();
     std::chrono::time_point<std::chrono::system_clock> start_time(
         std::chrono::system_clock::now());
@@ -341,45 +279,54 @@ void reducegpu(const float *h_in, float *h_out, int n, int method)
         switch (method)
         {
         case (0):
-            reduce0<<<grid_size, block_size, block_size * sizeof(float)>>>(d_in,
-                                                                           d_out, n);
+            reduce_interleaved_final<<<grid_size, block_size,
+                                       block_size * sizeof(float)>>>(d_in, d_out, n);
             break;
         case (1):
-            reduce_neighbor_1block<<<grid_size, block_size,
-                                     block_size * sizeof(float)>>>(d_in, d_out, n);
+            reduce_neighbor_final<<<grid_size, block_size,
+                                    block_size * sizeof(float)>>>(d_in, d_out, n);
+            break;
         case (2):
-            grid_size = n / block_size;
+        {
+            int blocks = n / block_size;
+            cudaMalloc(&d_tmp, sizeof(float) * blocks);
+            cudaMemset(d_tmp, 0, sizeof(float) * blocks);
 
-            cudaMalloc(&d_tmp, sizeof(float) * grid_size);
-            cudaMemset(d_tmp, 0, sizeof(float) * grid_size);
-
-            reduce_interleaved<<<grid_size, block_size, block_size * sizeof(float)>>>(
+            reduce_interleaved<<<blocks, block_size, block_size * sizeof(float)>>>(
                 d_in, d_tmp, n);
+            grid_size = blocks > 1024 ? 512 : blocks;
             reduce_interleaved_final<<<1, grid_size, grid_size * sizeof(float)>>>(
-                d_tmp, d_out, n);
+                d_tmp, d_out, blocks);
             cudaFree(d_tmp);
             break;
+        }
         case (3):
-            grid_size = n / block_size;
-            cudaMalloc(&d_tmp, sizeof(float) * grid_size);
-            cudaMemset(d_tmp, 0, sizeof(float) * grid_size);
+        {
+            int blocks = n / block_size;
+            cudaMalloc(&d_tmp, sizeof(float) * blocks);
+            cudaMemset(d_tmp, 0, sizeof(float) * blocks);
 
-            reduce_neighbor<<<grid_size, block_size, block_size * sizeof(float)>>>(
+            reduce_neighbor<<<blocks, block_size, block_size * sizeof(float)>>>(
                 d_in, d_tmp, n);
+            grid_size = blocks > 1024 ? 512 : blocks;
             reduce_neighbor_final<<<1, grid_size, grid_size * sizeof(float)>>>(
-                d_tmp, d_out, n);
+                d_tmp, d_out, blocks);
             cudaFree(d_tmp);
             break;
+        }
         case (4):
-            grid_size = n / block_size;
-            cudaMalloc(&d_tmp, sizeof(float) * grid_size);
-            cudaMemset(d_tmp, 0, sizeof(float) * grid_size);
-            reduce_shuffle<<<grid_size, block_size,
-                             block_size / 32 * sizeof(float)>>>(d_in, d_tmp, n);
+        {
+            int blocks = n / block_size;
+            cudaMalloc(&d_tmp, sizeof(float) * blocks);
+            cudaMemset(d_tmp, 0, sizeof(float) * blocks);
+            reduce_shuffle<<<blocks, block_size, block_size / 32 * sizeof(float)>>>(
+                d_in, d_tmp, n);
+            grid_size = blocks > 1024 ? 512 : blocks;
             reduce_shuffle_final<<<1, grid_size, grid_size / 32 * sizeof(float)>>>(
-                d_tmp, d_out, n);
+                d_tmp, d_out, blocks);
             cudaFree(d_tmp);
             break;
+        }
         default:
             break;
         }
@@ -401,42 +348,6 @@ void reducegpu(const float *h_in, float *h_out, int n, int method)
     printf("N=%d  time=%.3f ms  DRAM bandwidth=%.1f GB/s\n", n, ms,
            l2_throughput_gbs);
 
-    // TODO 2：用 __activemask() 和 __popc() 统计实际活跃 warp 数，计算 occupancy
-    std::vector<int> h_active_warp_count(gpu_info.num_sms);
-    int h_total_active_threads = 0;
-    cudaMemcpy(h_active_warp_count.data(), d_active_warp_count,
-               gpu_info.num_sms * sizeof(int), cudaMemcpyDeviceToHost);
-    cudaMemcpy(&h_total_active_threads, d_total_active_threads, sizeof(int),
-               cudaMemcpyDeviceToHost);
-    // 计算实际Occupancy
-    int total_active_warps = 0;
-    for (int sm = 0; sm < gpu_info.num_sms; sm++)
-    {
-        total_active_warps += h_active_warp_count[sm];
-    }
-    // 平均每个SM的活跃Warp数
-    float avg_active_warps_per_sm = (float)total_active_warps / gpu_info.num_sms;
-    // 实际Occupancy（%）
-    float actual_occupancy =
-        (avg_active_warps_per_sm / gpu_info.max_warps_per_sm) * 100.0f;
-    // 活跃线程占比
-    float active_thread_ratio =
-        (float)h_total_active_threads / (grid_size * block_size) * 100.0f;
-    // 输出结果
-    // std::cout
-    //     << "\n===================== Occupancy 统计结果 ====================="
-    //     << std::endl;
-    // std::cout << "核函数配置: 网格大小=" << grid_size
-    //           << ", 线程块大小=" << block_size << std::endl;
-    // std::cout << "总活跃Warp数: " << total_active_warps << std::endl;
-    // std::cout << "平均每个SM活跃Warp数: " << avg_active_warps_per_sm << std::endl;
-    // std::cout << "实际Occupancy: " << actual_occupancy << "%" << std::endl;
-    // std::cout << "总活跃线程数: " << h_total_active_threads << " / "
-    //           << grid_size * block_size << std::endl;
-    // std::cout << "活跃线程占比: " << active_thread_ratio << "%" << std::endl;
-    // // 释放资源
-    cudaFree(d_active_warp_count);
-    cudaFree(d_total_active_threads);
     cudaFree(d_in);
     cudaFree(d_out);
 }
@@ -457,7 +368,6 @@ int main(int argc, char **argv)
     float gold = 0.0f;
     reduce_cpu(h_in, n, gold);
     reducegpu(h_in, h_out, n, method_id);
-    // TODO 3：把 reduce1 改成 "完全 warp shuffle 无共享内存" 版本，再测一次带宽
 
     // check the result
     if (check_res(h_out[0], gold))
