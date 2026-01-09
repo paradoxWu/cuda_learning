@@ -7,7 +7,7 @@ else
 fi
 cd build
 echo "Begin compiling"
-cmake .. -DCMAKE_INSTALL_PREFIX=../
+cmake .. -DCMAKE_INSTALL_PREFIX=../ -DCMAKE_PREFIX_PATH=/usr/local/libtorch
 make
 make install
 cd ..

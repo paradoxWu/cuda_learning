@@ -4,28 +4,25 @@ project(${PROJECT_NAME}
     VERSION ${PROJECT_VERSION}
 )
 
-set(CMAKE_CUDA_STANDARD 11)
+set(CMAKE_CUDA_STANDARD 17)
+find_package(CUDA REQUIRED)
 
 add_executable(hello_world hello.cu)
-# set_target_properties(
-#         hello_world
-#         PROPERTIES
-#         CUDA_SEPARABLE_COMPILATION ON)
-
 add_executable(add_vec vecadd.cu)
 add_executable(matmul matmul.cu)
 add_executable(mattran mattran.cu)
 add_executable(matmul_v3 matmul_v3.cu)
 add_executable(reduce reduce.cu)
 
-find_package( OpenCV REQUIRED )
+find_package(OpenCV)
 IF (OpenCV_FOUND)
     include_directories(${OpenCV_INCLUDE_DIRS})
-ELSE ()
-    ADD_DEFINITIONS(-DWITHOUT_CV)
+    add_executable(gaussian_blur gaussian_blur.cu )
+    target_link_libraries(gaussian_blur ${OpenCV_LIBS} )
+    install(TARGETS gaussian_blur DESTINATION install)
+    install(DIRECTORY ${PROJECT_SOURCE_DIR}/images DESTINATION ${CMAKE_INSTALL_PREFIX}/install USE_SOURCE_PERMISSIONS)
 ENDIF ()
-add_executable(gaussian_blur gaussian_blur.cu )
-target_link_libraries(gaussian_blur ${OpenCV_LIBS} )
+
 
 
 
@@ -35,5 +32,5 @@ install(TARGETS add_vec DESTINATION install)
 install(TARGETS matmul DESTINATION install)
 install(TARGETS mattran DESTINATION install)
 install(TARGETS matmul_v3 DESTINATION install)
-install(TARGETS gaussian_blur DESTINATION install)
 install(TARGETS reduce DESTINATION install)
+
