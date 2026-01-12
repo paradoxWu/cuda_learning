@@ -6,6 +6,7 @@
 #include <limits>
 #include <random>
 #include <vector>
+#include <cmath>
 const float device_infinity = HUGE_VALF;
 
 std::vector<float> random_vector(std::size_t len, float min, float max)
@@ -34,8 +35,9 @@ bool check_vec_res(float *a, float *b, int n)
 {
     for (int i = 0; i < n; i++)
     {
-        if (!check_res(a[i], b[i]))
+        if (std::abs(a[i] - b[i]) > 0.0000001)
         {
+            std::cerr << "i:" << i << " a[i]:" << a[i] << ",b[i]:" << b[i] << std::endl;
             return false;
         }
     }
@@ -177,7 +179,7 @@ __global__ void softmax_step3(const float *in, float *out, float *sum_value,
     int id = threadIdx.x + blockDim.x * blockIdx.x;
     if (id < n)
     {
-        out[id] = in[id] / *sum_value;
+        out[id] = in[id] / (*sum_value);
     }
 }
 
@@ -216,17 +218,11 @@ void softmax_func(const float *in, float *out, int n)
         dev_max_tmp, dev_max, blocks_step_2);
 
     // if need check the max value
-    // auto end_time_1 = std::chrono::system_clock::now();
-    // auto gpu_max_duration =
-    // std::chrono::duration_cast<std::chrono::microseconds>(
-    // end_time_1 - start_time_1);
-    // std::cout << "Your CUDA max op took: " << gpu_max_duration.count() * 1e-3
-    // << "ms." << std::endl;
-    // float *max_value = new float[1];
-    // cudaDeviceSynchronize();
-    // cudaMemcpy(max_value, dev_max, sizeof(float), cudaMemcpyDeviceToHost);
-    // std::cout << "max value:" << *max_value << std::endl;
-    // delete[] max_value;
+    float *max_value = new float[1];
+    cudaDeviceSynchronize();
+    cudaMemcpy(max_value, dev_max, sizeof(float), cudaMemcpyDeviceToHost);
+    std::cout << "max value:" << *max_value << std::endl;
+    delete[] max_value;
     // end
 
     // step2 get each exp(item - max_value) & sum of all
@@ -235,16 +231,11 @@ void softmax_func(const float *in, float *out, int n)
     softmax_step2_2<<<1, blocks_step_2, blocks_step_2 / 32 * sizeof(float)>>>(
         dev_sum_tmp, dev_sum, blocks_step_2);
     // if need check the sum value
-    // auto end_time_2 = std::chrono::system_clock::now();
-    // auto gpu_sum_duration =
-    // std::chrono::duration_cast<std::chrono::microseconds>(
-    // end_time_2 - start_time_2);
-    // std::cout << "Your CUDA sum op took: " << gpu_sum_duration.count() * 1e-3
-    // << "ms." << std::endl;
-    // float *sum_value = new float[1];
-    // cudaMemcpy(sum_value, dev_sum, sizeof(float), cudaMemcpyDeviceToHost);
-    // std::cout << "sum value:" << *sum_value << std::endl;
-    // delete[] sum_value;
+    auto end_time_2 = std::chrono::system_clock::now();
+    float *sum_value = new float[1];
+    cudaMemcpy(sum_value, dev_sum, sizeof(float), cudaMemcpyDeviceToHost);
+    std::cout << "sum value:" << *sum_value << std::endl;
+    delete[] sum_value;
     // end
 
     // step3: get the softmax result
@@ -254,6 +245,7 @@ void softmax_func(const float *in, float *out, int n)
         end_time_3 - start_time_1);
     std::cout << "Your CUDA softmax op took: " << gpu_sf_duration.count() * 1e-3
               << "ms." << std::endl;
+    cudaMemcpy(out, dev_out, bytes, cudaMemcpyDeviceToHost);
 
     cudaFree(dev_max_tmp);
     cudaFree(dev_max);
@@ -264,14 +256,22 @@ void softmax_func(const float *in, float *out, int n)
     cudaFree(dev_out);
 }
 
-void softmax_cpu(const float *x, int n, int max_value, float *res)
+void softmax_cpu(const std::vector<float> &input, int n, float *res)
 {
     float sum = 0.0f;
-    for (int i = 0; i < n; ++i)
-        sum += (x[i] - max_value);
-    for (int i = 0; i < n; i++)
+    float maxVal = *std::max_element(input.begin(), input.end()); // 最大值平移防溢出
+    std::cout << "total max value by cpu:" << maxVal << std::endl;
+    std::vector<float> expValues(input.size());
+    for (size_t i = 0; i < input.size(); ++i)
     {
-        res[i] = x[i] / sum;
+        expValues[i] = std::exp(input[i] - maxVal);
+    }
+
+    float sumExp = std::accumulate(expValues.begin(), expValues.end(), 0.0);
+    std::cout << "total sum by cpu:" << sumExp << std::endl;
+    for (size_t i = 0; i < input.size(); ++i)
+    {
+        res[i] = expValues[i] / sumExp;
     }
 }
 
@@ -280,9 +280,8 @@ int main()
     int n = 1 << 20;
     auto input = random_vector(n, -100.0, 100.0);
     auto start = std::chrono::system_clock::now();
-    auto it = std::max_element(input.begin(), input.end());
     float *gold = new float[n];
-    softmax_cpu(input.data(), n, *it, gold);
+    softmax_cpu(input, n, gold);
     auto cpu_duration = std::chrono::duration_cast<std::chrono::microseconds>(
         std::chrono::system_clock::now() - start);
     std::cout << "softmax op cost by CPU:" << cpu_duration.count() * 1e-3 << "ms"
@@ -297,9 +296,9 @@ int main()
     else
     {
         std::cout << "Test Failed" << std::endl;
-
-        delete[] gpu_res;
-        delete[] gold;
-        return 0;
     }
+
+    delete[] gpu_res;
+    delete[] gold;
+    return 0;
 }
