@@ -106,43 +106,48 @@ __global__ void softmax_step1_2(const float *in, float *out, int blocks)
     }
 }
 
-__device__ float sum_warp_shuffle(float val)
+inline __device__ float warpReduceSum(float val)
 {
     for (int mask = 16; mask > 0; mask >>= 1)
-    {
         val += __shfl_xor_sync(0xffffffff, val, mask);
-    }
     return val;
 }
 
-__global__ void softmax_step2_1(const float *in, float *out, float *sum, int n,
+__global__ void softmax_step2_0(const float *in, float *out, int n,
                                 float *max_val)
 {
     int tid = threadIdx.x;
     int id = tid + blockDim.x * blockIdx.x;
-    float val = id < n ? __expf(in[id] - *max_val) : 0.0f;
-    // float val = id < n ? (in[id] - *max_val) : 0.0f;
+    float val = id < n ? expf(in[id] - *max_val) : 0.0f;
     if (id < n)
     {
         out[id] = val;
     }
-    float local_sum = val;
-    local_sum = sum_warp_shuffle(local_sum);
-    extern __shared__ float shm[];
-    if (tid % 32)
+}
+
+__global__ void softmax_step2_1(const float *d_in, float *d_out, int n)
+{
+    int idx = threadIdx.x + blockIdx.x * blockDim.x;
+    int tid = threadIdx.x;
+    float val = (idx < n) ? d_in[idx] : 0;
+    val = warpReduceSum(val); // 求一个warp内的和
+    // 每个warp的首线程（lane 0）将结果存入共享内存，再做block内归约
+    extern __shared__ float sdata[];
+    if (tid % 32 == 0)
     {
-        shm[tid / 32] = local_sum;
+        sdata[tid / 32] = val;
     }
     __syncthreads();
+    // 块内归约
     int warp_size = blockDim.x / 32;
-    if (tid / warp_size)
+    if (tid < warp_size)
     {
-        local_sum = shm[tid];
-        local_sum = sum_warp_shuffle(local_sum);
+        val = sdata[tid];
+        val = warpReduceSum(val);
     }
     if (tid == 0)
     {
-        sum[blockIdx.x] = local_sum;
+        d_out[blockIdx.x] = val;
     }
 }
 
@@ -154,7 +159,7 @@ __global__ void softmax_step2_2(const float *in, float *out, int blocks)
     {
         local += in[i];
     }
-    local = sum_warp_shuffle(local);
+    local = warpReduceSum(local);
     extern __shared__ float shm[];
     if (tid % 32 == 0)
     {
@@ -165,7 +170,7 @@ __global__ void softmax_step2_2(const float *in, float *out, int blocks)
     if (tid < warp_size)
     {
         local = shm[tid];
-        local = sum_warp_shuffle(local);
+        local = warpReduceSum(local);
     }
     if (tid == 0)
     {
@@ -215,27 +220,28 @@ void softmax_func(const float *in, float *out, int n)
         dev_in, dev_max_tmp, n);
     int blocks_step_2 = grids > 1024 ? 512 : grids;
     softmax_step1_2<<<1, blocks_step_2, blocks_step_2 / 32 * sizeof(float)>>>(
-        dev_max_tmp, dev_max, blocks_step_2);
+        dev_max_tmp, dev_max, grids);
 
     // if need check the max value
-    float *max_value = new float[1];
-    cudaDeviceSynchronize();
-    cudaMemcpy(max_value, dev_max, sizeof(float), cudaMemcpyDeviceToHost);
-    std::cout << "max value:" << *max_value << std::endl;
-    delete[] max_value;
+    // float *max_value = new float[1];
+    // cudaDeviceSynchronize();
+    // cudaMemcpy(max_value, dev_max, sizeof(float), cudaMemcpyDeviceToHost);
+    // std::cout << "max value:" << *max_value << std::endl;
+    // delete[] max_value;
     // end
 
     // step2 get each exp(item - max_value) & sum of all
+    softmax_step2_0<<<grids, blocks>>>(dev_in, ele_tmp, n, dev_max);
     softmax_step2_1<<<grids, blocks, blocks / 32 * sizeof(float)>>>(
-        dev_in, ele_tmp, dev_sum_tmp, n, dev_max);
+        ele_tmp, dev_sum_tmp, n);
     softmax_step2_2<<<1, blocks_step_2, blocks_step_2 / 32 * sizeof(float)>>>(
-        dev_sum_tmp, dev_sum, blocks_step_2);
+        dev_sum_tmp, dev_sum, grids);
     // if need check the sum value
-    auto end_time_2 = std::chrono::system_clock::now();
-    float *sum_value = new float[1];
-    cudaMemcpy(sum_value, dev_sum, sizeof(float), cudaMemcpyDeviceToHost);
-    std::cout << "sum value:" << *sum_value << std::endl;
-    delete[] sum_value;
+    // auto end_time_2 = std::chrono::system_clock::now();
+    // float *sum_value = new float[1];
+    // cudaMemcpy(sum_value, dev_sum, sizeof(float), cudaMemcpyDeviceToHost);
+    // std::cout << "sum value:" << *sum_value << std::endl;
+    // delete[] sum_value;
     // end
 
     // step3: get the softmax result
